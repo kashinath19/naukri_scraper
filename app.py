@@ -6,9 +6,10 @@ import os
 import threading
 from datetime import datetime
 import time
-import mysql.connector
+import psycopg2  # <-- CHANGED
+from psycopg2 import Error # <-- CHANGED
 import hashlib
-from mysql.connector import Error
+
 from nk15 import IntegratedNaukriScraper
 from dotenv import load_dotenv
 
