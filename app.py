@@ -6,10 +6,9 @@ import os
 import threading
 from datetime import datetime
 import time
-import psycopg2  # <-- CHANGED
-from psycopg2 import Error # <-- CHANGED
+import psycopg2  # <-- CHANGED: PostgreSQL connector
+from psycopg2 import Error # <-- CHANGED: PostgreSQL Error handling
 import hashlib
-
 from nk15 import IntegratedNaukriScraper
 from dotenv import load_dotenv
 
@@ -24,7 +23,7 @@ DB_CONFIG = {
     'user': os.getenv('DB_USER', 'root'),
     'password': os.getenv('DB_PASSWORD', ''),
     'database': os.getenv('DB_NAME', 'job_scraper_db'),
-    'port': int(os.getenv('DB_PORT', 3306))
+    'port': int(os.getenv('DB_PORT', 5432)) # <-- CHANGED: Default port to 5432 (PostgreSQL default)
 }
 
 # In-memory storage for job status (no persistence)
@@ -85,7 +84,7 @@ class ScrapingJob:
                 # Convert DataFrame to JSON-serializable format
                 jobs_data = df.to_dict('records')
                 
-                # Save to MySQL database
+                # Save to PostgreSQL database
                 saved_count = self._save_to_database(jobs_data)
                 
                 # Calculate comprehensive stats
@@ -121,37 +120,41 @@ class ScrapingJob:
             self.end_time = datetime.now()
 
     def _save_to_database(self, jobs_data):
-        """Save job data to MySQL database - ONLY 18 required columns"""
+        """Save job data to PostgreSQL database - ONLY 18 required columns"""
+        connection = None # Initialize connection outside try/except
         try:
-            connection = mysql.connector.connect(**DB_CONFIG)
+            connection = psycopg2.connect(**DB_CONFIG) # <-- CHANGED
+            # We explicitly disable autocommit to use a transaction
+            connection.autocommit = False 
             cursor = connection.cursor()
             
             # Create table with ONLY 18 required columns + internal fields
+            # NOTE: PostgreSQL uses SERIAL for auto-increment, TEXT for large strings, 
+            # and requires explicit `UNIQUE` constraint for ON CONFLICT clause.
             create_table_query = """
                 CREATE TABLE IF NOT EXISTS naukri_jobs (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    id SERIAL PRIMARY KEY,  -- CHANGED to SERIAL
                     title VARCHAR(500),
                     company VARCHAR(255),
                     location VARCHAR(255),
                     posted_time VARCHAR(100),
-                    description LONGTEXT,
+                    description TEXT,       -- CHANGED to TEXT
                     employment_type VARCHAR(100),
                     seniority_level VARCHAR(100),
                     industries VARCHAR(255),
                     job_function VARCHAR(255),
                     company_url VARCHAR(500),
                     company_logo VARCHAR(500),
-                    company_about LONGTEXT,
-                    job_url LONGTEXT,
+                    company_about TEXT,     -- CHANGED to TEXT
+                    job_url TEXT,           -- CHANGED to TEXT
                     search_keywords VARCHAR(255),
                     search_location VARCHAR(255),
-                    extracted_skills LONGTEXT,
+                    extracted_skills TEXT,  -- CHANGED to TEXT
                     salary_range VARCHAR(255),
                     applicant_count VARCHAR(100),
-                    job_hash VARCHAR(64),
+                    job_hash VARCHAR(64) UNIQUE, -- ADDED UNIQUE CONSTRAINT
                     scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE KEY unique_job (job_hash),
-                    INDEX idx_search (search_keywords, search_location),
+                    INDEX idx_search (search_keywords, search_location), -- Note: Psycopg2/PG supports index creation this way
                     INDEX idx_company (company),
                     INDEX idx_location (location),
                     INDEX idx_scraped (scraped_at)
@@ -160,6 +163,7 @@ class ScrapingJob:
             cursor.execute(create_table_query)
             
             # Insert job data with ONLY 18 required fields
+            # NOTE: Uses PostgreSQL's ON CONFLICT DO UPDATE SET (UPSERT)
             insert_query = """
             INSERT INTO naukri_jobs (
                 title, company, location, posted_time, description, employment_type,
@@ -167,12 +171,12 @@ class ScrapingJob:
                 company_about, job_url, search_keywords, search_location,
                 extracted_skills, salary_range, applicant_count, job_hash
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-                description=VALUES(description),
-                extracted_skills=VALUES(extracted_skills),
-                salary_range=VALUES(salary_range),
-                applicant_count=VALUES(applicant_count),
-                posted_time=VALUES(posted_time)
+            ON CONFLICT (job_hash) DO UPDATE SET -- CHANGED to PostgreSQL syntax
+                description=EXCLUDED.description,
+                extracted_skills=EXCLUDED.extracted_skills,
+                salary_range=EXCLUDED.salary_range,
+                applicant_count=EXCLUDED.applicant_count,
+                posted_time=EXCLUDED.posted_time
             """
             
             saved_count = 0
@@ -207,6 +211,7 @@ class ScrapingJob:
                     saved_count += 1
                 except Exception as e:
                     print(f"⚠️ Error inserting job {job.get('title')}: {e}")
+                    # Continue loop, but print error
                     continue
             
             connection.commit()
@@ -217,7 +222,7 @@ class ScrapingJob:
             print(f"❌ Database error: {e}")
             return 0
         finally:
-            if connection.is_connected():
+            if connection and not connection.closed:
                 cursor.close()
                 connection.close()
 
@@ -226,9 +231,9 @@ def run_scraping_job(job_id):
     job = jobs[job_id]
     job.run_scraping()
 
-@app.route('/')
+@app.route('/index')
 def serve_frontend():
-    return render_template('scraper.html')
+    return render_template('index.html')
 
 @app.route('/api/scrape', methods=['POST'])
 def start_scraping():
@@ -364,8 +369,9 @@ def delete_job(job_id):
 @app.route('/api/database/stats', methods=['GET'])
 def get_database_stats():
     """Get database statistics"""
+    connection = None
     try:
-        connection = mysql.connector.connect(**DB_CONFIG)
+        connection = psycopg2.connect(**DB_CONFIG) # <-- CHANGED
         cursor = connection.cursor()
         
         # Get total jobs count
@@ -400,35 +406,36 @@ def get_database_stats():
             'error': f'Database error: {str(e)}'
         }), 500
     finally:
-        if 'connection' in locals() and connection.is_connected():
+        if connection and not connection.closed:
             cursor.close()
             connection.close()
 
 @app.route('/api/database/search', methods=['GET'])
 def search_database():
     """Search jobs in database"""
+    connection = None
     try:
         keywords = request.args.get('keywords', '')
         location = request.args.get('location', '')
         company = request.args.get('company', '')
         limit = int(request.args.get('limit', 50))
         
-        connection = mysql.connector.connect(**DB_CONFIG)
-        cursor = connection.cursor(dictionary=True)
+        connection = psycopg2.connect(**DB_CONFIG) # <-- CHANGED
+        cursor = connection.cursor(cursor_factory=psycopg2.extras.DictCursor) # Using DictCursor for dictionary results
         
         query = "SELECT * FROM naukri_jobs WHERE 1=1"
         params = []
         
         if keywords:
-            query += " AND (title LIKE %s OR extracted_skills LIKE %s OR description LIKE %s)"
+            query += " AND (title ILIKE %s OR extracted_skills ILIKE %s OR description ILIKE %s)" # ILIKE for case-insensitive search in PG
             params.extend([f'%{keywords}%', f'%{keywords}%', f'%{keywords}%'])
         
         if location:
-            query += " AND location LIKE %s"
+            query += " AND location ILIKE %s"
             params.append(f'%{location}%')
             
         if company:
-            query += " AND company LIKE %s"
+            query += " AND company ILIKE %s"
             params.append(f'%{company}%')
         
         query += " ORDER BY scraped_at DESC LIMIT %s"
@@ -437,15 +444,18 @@ def search_database():
         cursor.execute(query, params)
         jobs_result = cursor.fetchall()
         
-        # Convert datetime objects to strings for JSON serialization
+        # Convert fetched records to standard dictionary list and handle datetime objects
+        jobs_list = []
         for job in jobs_result:
-            if job.get('scraped_at'):
-                job['scraped_at'] = job['scraped_at'].isoformat()
+            job_dict = dict(job)
+            if job_dict.get('scraped_at'):
+                job_dict['scraped_at'] = job_dict['scraped_at'].isoformat()
+            jobs_list.append(job_dict)
         
         return jsonify({
             'success': True,
-            'jobs': jobs_result,
-            'count': len(jobs_result)
+            'jobs': jobs_list,
+            'count': len(jobs_list)
         })
         
     except Error as e:
@@ -454,18 +464,19 @@ def search_database():
             'error': f'Database error: {str(e)}'
         }), 500
     finally:
-        if 'connection' in locals() and connection.is_connected():
+        if connection and not connection.closed:
             cursor.close()
             connection.close()
 
 @app.route('/api/database/check-duplicates', methods=['POST'])
 def check_duplicates():
     """Check if specific jobs exist in database"""
+    connection = None
     try:
         data = request.get_json()
         jobs_to_check = data.get('jobs', [])
         
-        connection = mysql.connector.connect(**DB_CONFIG)
+        connection = psycopg2.connect(**DB_CONFIG) # <-- CHANGED
         cursor = connection.cursor()
         
         # Compute hashes and check
@@ -515,12 +526,15 @@ def health_check():
     
     # Check database connection
     db_healthy = False
+    connection = None
     try:
-        connection = mysql.connector.connect(**DB_CONFIG)
+        connection = psycopg2.connect(**DB_CONFIG) # <-- CHANGED
         db_healthy = connection.is_connected()
-        connection.close()
     except:
         pass
+    finally:
+        if connection and not connection.closed:
+            connection.close()
     
     return jsonify({
         'success': True,
@@ -537,21 +551,11 @@ def health_check():
 
 # Initialize database on startup
 def initialize_database():
-    """Initialize database and create tables if they don't exist"""
+    """Attempt to connect to the PostgreSQL database on startup"""
     try:
-        # First connect without database to create it if needed
-        temp_config = DB_CONFIG.copy()
-        temp_config.pop('database', None)
-        
-        connection = mysql.connector.connect(**temp_config)
-        cursor = connection.cursor()
-        
-        # Create database if not exists
-        cursor.execute(f"CREATE DATABASE IF NOT EXISTS {DB_CONFIG['database']}")
-        print(f"✅ Database '{DB_CONFIG['database']}' ready")
-        
-        cursor.close()
+        connection = psycopg2.connect(**DB_CONFIG) # <-- CHANGED
         connection.close()
+        print(f"✅ Database connection test successful!")
         
     except Error as e:
         print(f"❌ Database initialization error: {e}")
@@ -576,7 +580,7 @@ if __name__ == '__main__':
     # Initialize database
     initialize_database()
     
-    print("🚀 Starting Naukri Scraper API with MySQL Database & DEDUPLICATION...")
+    print("🚀 Starting Naukri Scraper API with PostgreSQL Database & DEDUPLICATION...")
     print("📊 API Endpoints:")
     print("   POST /api/scrape - Start scraping job (auto-skips duplicates)")
     print("   GET  /api/status/<job_id> - Check job status") 
@@ -586,7 +590,7 @@ if __name__ == '__main__':
     print("   POST /api/database/check-duplicates - Check if jobs exist")
     print("   DELETE /api/jobs/<job_id> - Delete job")
     print("   GET  /api/health - Health check")
-    print("\n💾 Saving ONLY 18 required columns to MySQL")
+    print("\n💾 Saving ONLY 18 required columns to PostgreSQL")
     print("🔍 DEDUPLICATION ENABLED:")
     print("   - Loads existing job hashes on startup")
     print("   - Checks each job before scraping")
