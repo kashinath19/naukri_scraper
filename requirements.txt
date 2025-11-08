@@ -3,7 +3,7 @@ flask-cors
 pandas
 beautifulsoup4
 selenium
-mysql-connector-python
+psycopg2-binary
 python-dotenv
 gunicorn
 webdriver-manager
