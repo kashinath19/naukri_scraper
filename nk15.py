@@ -12,8 +12,8 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from typing import List, Dict, Optional, Set
 import hashlib
-import mysql.connector
-from mysql.connector import Error
+import psycopg2  # <-- CHANGED: PostgreSQL connector
+from psycopg2 import Error # <-- CHANGED: PostgreSQL Error handling
 import os
 from dotenv import load_dotenv
 
@@ -81,16 +81,17 @@ class IntegratedNaukriScraper:
             'user': os.getenv('DB_USER', 'root'),
             'password': os.getenv('DB_PASSWORD', ''),
             'database': os.getenv('DB_NAME', 'job_scraper_db'),
-            'port': int(os.getenv('DB_PORT', 3306))
+            'port': int(os.getenv('DB_PORT', 5432)) # Defaulting to PG port
         }
     
     def _load_existing_jobs(self):
-        """Load existing job URLs AND hashes from database"""
+        """Load existing job URLs AND hashes from database (PostgreSQL)"""
         try:
-            connection = mysql.connector.connect(**self.db_config)
+            connection = psycopg2.connect(**self.db_config) # <-- CHANGED
             cursor = connection.cursor()
             
             # Get both URLs and hashes
+            # Note: Assuming the naukri_jobs table has been created by app.py
             cursor.execute("SELECT job_url, job_hash FROM naukri_jobs")
             records = cursor.fetchall()
             
@@ -104,7 +105,12 @@ class IntegratedNaukriScraper:
             connection.close()
             
         except Error as e:
-            print(f"⚠️ Could not load existing jobs: {e}")
+            # Check for "relation "naukri_jobs" does not exist" error (first run case)
+            if "relation \"naukri_jobs\" does not exist" in str(e):
+                 print("⚠️ Table 'naukri_jobs' not found, proceeding with empty sets.")
+            else:
+                print(f"⚠️ Could not load existing jobs: {e}")
+            
             self.existing_urls = set()
             self.existing_hashes = set()
     
