@@ -231,9 +231,9 @@ def run_scraping_job(job_id):
     job = jobs[job_id]
     job.run_scraping()
 
-@app.route('/index')
+@app.route('/')
 def serve_frontend():
-    return render_template('index.html')
+    return render_template('scraper.html')
 
 @app.route('/api/scrape', methods=['POST'])
 def start_scraping():
