@@ -149,7 +149,6 @@ class ScrapingJob:
                     applicant_count VARCHAR(100),
                     job_hash VARCHAR(64),
                     scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     UNIQUE KEY unique_job (job_hash),
                     INDEX idx_search (search_keywords, search_location),
                     INDEX idx_company (company),
@@ -172,8 +171,7 @@ class ScrapingJob:
                 extracted_skills=VALUES(extracted_skills),
                 salary_range=VALUES(salary_range),
                 applicant_count=VALUES(applicant_count),
-                posted_time=VALUES(posted_time),
-                updated_at=CURRENT_TIMESTAMP
+                posted_time=VALUES(posted_time)
             """
             
             saved_count = 0
@@ -385,15 +383,10 @@ def get_database_stats():
         cursor.execute("SELECT title, company, location, scraped_at FROM naukri_jobs ORDER BY scraped_at DESC LIMIT 5")
         latest_jobs = cursor.fetchall()
         
-        # Get duplicate stats
-        cursor.execute("SELECT COUNT(*) FROM naukri_jobs WHERE updated_at > scraped_at")
-        updated_count = cursor.fetchone()[0]
-        
         return jsonify({
             'success': True,
             'stats': {
                 'total_jobs': total_jobs,
-                'updated_jobs': updated_count,
                 'top_companies': [{'company': row[0], 'count': row[1]} for row in companies],
                 'top_locations': [{'location': row[0], 'count': row[1]} for row in locations],
                 'latest_jobs': [{'title': row[0], 'company': row[1], 'location': row[2], 'scraped_at': row[3].isoformat() if row[3] else None} for row in latest_jobs]
@@ -447,8 +440,6 @@ def search_database():
         for job in jobs_result:
             if job.get('scraped_at'):
                 job['scraped_at'] = job['scraped_at'].isoformat()
-            if job.get('updated_at'):
-                job['updated_at'] = job['updated_at'].isoformat()
         
         return jsonify({
             'success': True,

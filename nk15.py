@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-INTEGRATED NAUKRI SCRAPER - DEDUPLICATION VERSION
-Checks database before scraping to avoid duplicates
+INTEGRATED NAUKRI SCRAPER - PERFECT DEDUPLICATION
+Uses job_url as PRIMARY unique identifier + normalized hash as backup
 """
 
 import time
@@ -23,10 +23,14 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.chrome.options import Options
 
 
+# DO NOT ADD: from nk15 import IntegratedNaukriScraper
+# This causes circular import!
+
+
 class IntegratedNaukriScraper:
     """
-    Naukri scraper - extracts only 18 required fields
-    Checks database to avoid scraping duplicates
+    Naukri scraper - extracts 18 required fields
+    PERFECT deduplication using job_url + normalized hash
     """
     
     SELECTORS = {
@@ -63,9 +67,10 @@ class IntegratedNaukriScraper:
         self.driver = None
         self.wait = None
         self.scraped_jobs = []
-        self.existing_hashes: Set[str] = set()
+        self.existing_urls: Set[str] = set()  # PRIMARY: URLs
+        self.existing_hashes: Set[str] = set()  # BACKUP: Hashes
         self.db_config = db_config or self._load_db_config()
-        self._load_existing_hashes()
+        self._load_existing_jobs()
         self._setup_driver()
     
     def _load_db_config(self):
@@ -79,44 +84,95 @@ class IntegratedNaukriScraper:
             'port': int(os.getenv('DB_PORT', 3306))
         }
     
-    def _load_existing_hashes(self):
-        """Load all existing job hashes from database to memory for quick lookup"""
+    def _load_existing_jobs(self):
+        """Load existing job URLs AND hashes from database"""
         try:
             connection = mysql.connector.connect(**self.db_config)
             cursor = connection.cursor()
             
-            cursor.execute("SELECT job_hash FROM naukri_jobs")
-            hashes = cursor.fetchall()
+            # Get both URLs and hashes
+            cursor.execute("SELECT job_url, job_hash FROM naukri_jobs")
+            records = cursor.fetchall()
             
-            self.existing_hashes = {hash_tuple[0] for hash_tuple in hashes}
+            self.existing_urls = {self._normalize_url(url) for url, _ in records if url}
+            self.existing_hashes = {hash_val for _, hash_val in records if hash_val}
+            
+            print(f"📊 Loaded {len(self.existing_urls)} existing job URLs from database")
             print(f"📊 Loaded {len(self.existing_hashes)} existing job hashes from database")
             
             cursor.close()
             connection.close()
             
         except Error as e:
-            print(f"⚠️ Could not load existing hashes: {e}")
+            print(f"⚠️ Could not load existing jobs: {e}")
+            self.existing_urls = set()
             self.existing_hashes = set()
     
-    def _compute_job_hash(self, title: str, company: str, location: str, job_url: str) -> str:
+    def _normalize_url(self, url: str) -> str:
         """
-        Compute a unique hash for a job based on title, company, location, and URL
-        This ensures we identify the same job posting across scrapes
+        Normalize URL for comparison
+        Remove query parameters, trailing slashes, etc.
         """
-        # Normalize inputs
-        title_normalized = re.sub(r'\s+', ' ', (title or '').strip().lower())
-        company_normalized = re.sub(r'\s+', ' ', (company or '').strip().lower())
-        location_normalized = re.sub(r'\s+', ' ', (location or '').strip().lower())
-        url_normalized = (job_url or '').strip()
+        if not url:
+            return ""
         
-        # Create hash from combination
-        hash_input = f"{title_normalized}|{company_normalized}|{location_normalized}|{url_normalized}"
+        # Remove protocol
+        url = re.sub(r'^https?://', '', url.lower())
+        
+        # Remove www.
+        url = re.sub(r'^www\.', '', url)
+        
+        # Remove query parameters
+        url = url.split('?')[0]
+        
+        # Remove trailing slash
+        url = url.rstrip('/')
+        
+        return url
+    
+    def _compute_job_hash(self, title: str, company: str, location: str) -> str:
+        """
+        Compute hash from ONLY: title + company + location
+        DO NOT include job_url or search keywords
+        """
+        # Aggressive normalization
+        def normalize(text: str) -> str:
+            if not text:
+                return ""
+            # Convert to lowercase
+            text = text.lower()
+            # Remove all special characters and extra spaces
+            text = re.sub(r'[^\w\s]', '', text)
+            # Replace multiple spaces with single space
+            text = re.sub(r'\s+', ' ', text)
+            return text.strip()
+        
+        title_norm = normalize(title)
+        company_norm = normalize(company)
+        location_norm = normalize(location)
+        
+        # Create hash from normalized combination
+        hash_input = f"{title_norm}|{company_norm}|{location_norm}"
         return hashlib.sha256(hash_input.encode('utf-8')).hexdigest()
     
     def _is_job_already_scraped(self, title: str, company: str, location: str, job_url: str) -> bool:
-        """Check if job already exists in database"""
-        job_hash = self._compute_job_hash(title, company, location, job_url)
-        return job_hash in self.existing_hashes
+        """
+        Check if job exists using TWO-LEVEL CHECK:
+        1. PRIMARY: Check by normalized URL (most reliable)
+        2. BACKUP: Check by hash (catches URL variations)
+        """
+        # Level 1: Check URL (PRIMARY)
+        if job_url:
+            normalized_url = self._normalize_url(job_url)
+            if normalized_url in self.existing_urls:
+                return True
+        
+        # Level 2: Check hash (BACKUP)
+        job_hash = self._compute_job_hash(title, company, location)
+        if job_hash in self.existing_hashes:
+            return True
+        
+        return False
     
     def _setup_driver(self):
         """Setup Chrome driver"""
@@ -516,7 +572,7 @@ class IntegratedNaukriScraper:
         return 'Engineering'
 
     def _extract_job_details(self, card) -> Optional[Dict]:
-        """Extract ONLY the 18 required fields - with duplicate check"""
+        """Extract ONLY the 18 required fields - with PERFECT duplicate check"""
         try:
             title = self._safe_extract(card, self.SELECTORS['title'])
             if not title or title == 'N/A':
@@ -529,12 +585,12 @@ class IntegratedNaukriScraper:
             if job_url and not job_url.startswith('http'):
                 job_url = 'https://www.naukri.com' + job_url
             
-            # CHECK IF JOB ALREADY EXISTS
+            # ✅ PERFECT DUPLICATE CHECK: URL + Hash
             if self._is_job_already_scraped(title, company, location, job_url):
-                print(f"  ⏭️  SKIPPED (already in DB): {title[:50]}...")
+                print(f"  ⏭️  SKIPPED (duplicate): {title[:50]}...")
                 return None
             
-            print(f"  🔍 Processing NEW: {title[:50]}...", end=" ")
+            print(f"  🔍 NEW: {title[:50]}...", end=" ")
             
             # Card-level extractions
             employment_type = self._extract_employment_type(card)
@@ -547,8 +603,8 @@ class IntegratedNaukriScraper:
             # Get complete details from job page
             page_details = self._extract_complete_description(job_url)
             
-            # Compute hash for this job
-            job_hash = self._compute_job_hash(title, company, location, job_url)
+            # Compute hash (WITHOUT URL)
+            job_hash = self._compute_job_hash(title, company, location)
             
             # Return ONLY 18 required fields
             job_data = {
@@ -571,7 +627,9 @@ class IntegratedNaukriScraper:
                 'job_hash': job_hash
             }
             
-            # Add hash to existing set
+            # Add to tracking sets
+            if job_url:
+                self.existing_urls.add(self._normalize_url(job_url))
             self.existing_hashes.add(job_hash)
             
             print("✅")
@@ -618,12 +676,11 @@ class IntegratedNaukriScraper:
                 return pd.DataFrame()
             
             # Process cards until we get 'limit' NEW jobs
-            processed = 0
             for i, card in enumerate(job_cards):
                 if len(self.scraped_jobs) >= limit:
                     break
                     
-                print(f"\n📋 Checking job {i+1}/{len(job_cards)}")
+                print(f"\n📋 Card {i+1}/{len(job_cards)}")
                 job_data = self._extract_job_details(card)
                 
                 if job_data:
@@ -634,9 +691,8 @@ class IntegratedNaukriScraper:
                     skipped_count += 1
                 
                 self._human_delay(2, 3)
-                processed += 1
             
-            print(f"\n📊 Summary: {len(self.scraped_jobs)} new jobs, {skipped_count} skipped (already in DB)")
+            print(f"\n📊 Summary: {len(self.scraped_jobs)} NEW, {skipped_count} duplicates skipped")
             
             return self._create_dataframe()
             
