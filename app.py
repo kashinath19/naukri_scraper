@@ -123,7 +123,15 @@ class ScrapingJob:
         """Save job data to PostgreSQL database - ONLY 18 required columns"""
         connection = None # Initialize connection outside try/except
         try:
-            connection = psycopg2.connect(**DB_CONFIG) # <-- CHANGED
+            #connection = psycopg2.connect(**DB_CONFIG) # <-- CHANGED
+            connection = psycopg2.connect(
+                            host=DB_CONFIG['host'],
+                            user=DB_CONFIG['user'],
+                            password=DB_CONFIG['password'],
+                            dbname=DB_CONFIG['database'],
+                            port=DB_CONFIG['port'],
+                            sslmode='require'
+                        )
             # We explicitly disable autocommit to use a transaction
             connection.autocommit = False 
             cursor = connection.cursor()
