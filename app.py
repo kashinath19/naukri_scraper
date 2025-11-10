@@ -255,13 +255,24 @@ def run_scraping_job(job_id):
     job = jobs[job_id]
     job.run_scraping()
 
+# ============ FIXED ROUTES ============
+
 @app.route('/')
-def serve_frontend():
+def serve_scraper():
+    """Serve scraper page (root)"""
+    return render_template('scraper.html')
+
+@app.route('/scraper')
+def serve_scraper_alias():
+    """Serve scraper page (alias route) - FIXED"""
     return render_template('scraper.html')
 
 @app.route('/marketplace')
 def serve_marketplace():
+    """Serve marketplace page"""
     return render_template('marketplace.html')
+
+# ============ API ROUTES ============
 
 @app.route('/api/scrape', methods=['POST'])
 def start_scraping():
@@ -321,7 +332,7 @@ def start_scraping():
 
 @app.route('/api/status/<job_id>', methods=['GET'])
 def get_job_status(job_id):
-    """Get status of a scraping job - FIXED response format"""
+    """Get status of a scraping job"""
     if job_id not in jobs:
         return jsonify({
             'success': False,
@@ -357,7 +368,7 @@ def get_job_status(job_id):
 
 @app.route('/api/jobs', methods=['GET'])
 def get_all_jobs():
-    """Get all jobs from database - NEW ENDPOINT"""
+    """Get all jobs from database"""
     connection = None
     try:
         connection = psycopg2.connect(
@@ -410,7 +421,7 @@ def get_all_jobs():
 
 @app.route('/api/jobs', methods=['POST'])
 def add_manual_job():
-    """Add a job manually - NEW ENDPOINT"""
+    """Add a job manually"""
     connection = None
     try:
         data = request.get_json()
@@ -738,8 +749,8 @@ if __name__ == '__main__':
     print("📊 API Endpoints:")
     print("    POST /api/scrape - Start scraping job")
     print("    GET  /api/status/<job_id> - Check job status") 
-    print("    GET  /api/jobs - Get all jobs from database (NEW)")
-    print("    POST /api/jobs - Add job manually (NEW)")
+    print("    GET  /api/jobs - Get all jobs from database")
+    print("    POST /api/jobs - Add job manually")
     print("    GET  /api/jobs/recent - List recent scraping jobs")
     print("    GET  /api/database/stats - Get database statistics")
     print("    GET  /api/database/search - Search jobs in database")
@@ -750,5 +761,6 @@ if __name__ == '__main__':
     print("🔍 DEDUPLICATION ENABLED")
     print("🧹 Automatic cleanup: Keeps last 50 jobs in memory")
     print("🌐 Access at: http://localhost:5000")
+    print("🌐 Routes: / and /scraper (scraper), /marketplace (marketplace)")
     
     app.run(host='0.0.0.0', port=5000, debug=False)
