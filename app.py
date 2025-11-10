@@ -6,9 +6,11 @@ import os
 import threading
 from datetime import datetime
 import time
-import psycopg2  # <-- CHANGED: PostgreSQL connector
+import psycopg2 # <-- CHANGED: PostgreSQL connector
 from psycopg2 import Error # <-- CHANGED: PostgreSQL Error handling
+import psycopg2.extras # For DictCursor in search_database
 import hashlib
+import re # Needed for check_duplicates to normalize hash input
 from nk15 import IntegratedNaukriScraper
 from dotenv import load_dotenv
 
@@ -123,15 +125,14 @@ class ScrapingJob:
         """Save job data to PostgreSQL database - ONLY 18 required columns"""
         connection = None # Initialize connection outside try/except
         try:
-            #connection = psycopg2.connect(**DB_CONFIG) # <-- CHANGED
             connection = psycopg2.connect(
-                            host=DB_CONFIG['host'],
-                            user=DB_CONFIG['user'],
-                            password=DB_CONFIG['password'],
-                            dbname=DB_CONFIG['database'],
-                            port=DB_CONFIG['port'],
-                            sslmode='require'
-                        )
+                host=DB_CONFIG['host'],
+                user=DB_CONFIG['user'],
+                password=DB_CONFIG['password'],
+                dbname=DB_CONFIG['database'],
+                port=DB_CONFIG['port'],
+                sslmode='require' # <-- UPDATED: Added sslmode='require' for secure connection
+            )
             # We explicitly disable autocommit to use a transaction
             connection.autocommit = False 
             cursor = connection.cursor()
@@ -161,15 +162,26 @@ class ScrapingJob:
                     salary_range VARCHAR(255),
                     applicant_count VARCHAR(100),
                     job_hash VARCHAR(64) UNIQUE, -- ADDED UNIQUE CONSTRAINT
-                    scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    INDEX idx_search (search_keywords, search_location), -- Note: Psycopg2/PG supports index creation this way
-                    INDEX idx_company (company),
-                    INDEX idx_location (location),
-                    INDEX idx_scraped (scraped_at)
+                    scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    -- Psycopg2/PG does not support inline INDEX creation in CREATE TABLE like this:
+                    -- INDEX idx_search (search_keywords, search_location),
+                    -- INDEX idx_company (company),
+                    -- INDEX idx_location (location),
+                    -- INDEX idx_scraped (scraped_at)
                 )
             """
             cursor.execute(create_table_query)
             
+            # Create indexes explicitly (if they don't exist)
+            index_queries = [
+                "CREATE INDEX IF NOT EXISTS idx_search ON naukri_jobs (search_keywords, search_location)",
+                "CREATE INDEX IF NOT EXISTS idx_company ON naukri_jobs (company)",
+                "CREATE INDEX IF NOT EXISTS idx_location ON naukri_jobs (location)",
+                "CREATE INDEX IF NOT EXISTS idx_scraped ON naukri_jobs (scraped_at)",
+            ]
+            for query in index_queries:
+                cursor.execute(query)
+
             # Insert job data with ONLY 18 required fields
             # NOTE: Uses PostgreSQL's ON CONFLICT DO UPDATE SET (UPSERT)
             insert_query = """
@@ -379,7 +391,14 @@ def get_database_stats():
     """Get database statistics"""
     connection = None
     try:
-        connection = psycopg2.connect(**DB_CONFIG) # <-- CHANGED
+        connection = psycopg2.connect(
+            host=DB_CONFIG['host'],
+            user=DB_CONFIG['user'],
+            password=DB_CONFIG['password'],
+            dbname=DB_CONFIG['database'],
+            port=DB_CONFIG['port'],
+            sslmode='require' # <-- UPDATED: Added sslmode='require'
+        )
         cursor = connection.cursor()
         
         # Get total jobs count
@@ -428,7 +447,14 @@ def search_database():
         company = request.args.get('company', '')
         limit = int(request.args.get('limit', 50))
         
-        connection = psycopg2.connect(**DB_CONFIG) # <-- CHANGED
+        connection = psycopg2.connect(
+            host=DB_CONFIG['host'],
+            user=DB_CONFIG['user'],
+            password=DB_CONFIG['password'],
+            dbname=DB_CONFIG['database'],
+            port=DB_CONFIG['port'],
+            sslmode='require' # <-- UPDATED: Added sslmode='require'
+        )
         cursor = connection.cursor(cursor_factory=psycopg2.extras.DictCursor) # Using DictCursor for dictionary results
         
         query = "SELECT * FROM naukri_jobs WHERE 1=1"
@@ -484,7 +510,14 @@ def check_duplicates():
         data = request.get_json()
         jobs_to_check = data.get('jobs', [])
         
-        connection = psycopg2.connect(**DB_CONFIG) # <-- CHANGED
+        connection = psycopg2.connect(
+            host=DB_CONFIG['host'],
+            user=DB_CONFIG['user'],
+            password=DB_CONFIG['password'],
+            dbname=DB_CONFIG['database'],
+            port=DB_CONFIG['port'],
+            sslmode='require' # <-- UPDATED: Added sslmode='require'
+        )
         cursor = connection.cursor()
         
         # Compute hashes and check
@@ -536,8 +569,18 @@ def health_check():
     db_healthy = False
     connection = None
     try:
-        connection = psycopg2.connect(**DB_CONFIG) # <-- CHANGED
-        db_healthy = connection.is_connected()
+        connection = psycopg2.connect(
+            host=DB_CONFIG['host'],
+            user=DB_CONFIG['user'],
+            password=DB_CONFIG['password'],
+            dbname=DB_CONFIG['database'],
+            port=DB_CONFIG['port'],
+            sslmode='require' # <-- UPDATED: Added sslmode='require'
+        )
+        # Check connection status using a simple query, as psycopg2.connect does not have .is_connected()
+        cursor = connection.cursor()
+        cursor.execute("SELECT 1")
+        db_healthy = True
     except:
         pass
     finally:
@@ -561,7 +604,14 @@ def health_check():
 def initialize_database():
     """Attempt to connect to the PostgreSQL database on startup"""
     try:
-        connection = psycopg2.connect(**DB_CONFIG) # <-- CHANGED
+        connection = psycopg2.connect(
+            host=DB_CONFIG['host'],
+            user=DB_CONFIG['user'],
+            password=DB_CONFIG['password'],
+            dbname=DB_CONFIG['database'],
+            port=DB_CONFIG['port'],
+            sslmode='require' # <-- UPDATED: Added sslmode='require'
+        )
         connection.close()
         print(f"✅ Database connection test successful!")
         
@@ -590,20 +640,21 @@ if __name__ == '__main__':
     
     print("🚀 Starting Naukri Scraper API with PostgreSQL Database & DEDUPLICATION...")
     print("📊 API Endpoints:")
-    print("   POST /api/scrape - Start scraping job (auto-skips duplicates)")
-    print("   GET  /api/status/<job_id> - Check job status") 
-    print("   GET  /api/jobs/recent - List recent jobs")
-    print("   GET  /api/database/stats - Get database statistics")
-    print("   GET  /api/database/search - Search jobs in database")
-    print("   POST /api/database/check-duplicates - Check if jobs exist")
-    print("   DELETE /api/jobs/<job_id> - Delete job")
-    print("   GET  /api/health - Health check")
+    print("    POST /api/scrape - Start scraping job (auto-skips duplicates)")
+    print("    GET  /api/status/<job_id> - Check job status") 
+    print("    GET  /api/jobs/recent - List recent jobs")
+    print("    GET  /api/database/stats - Get database statistics")
+    print("    GET  /api/database/search - Search jobs in database")
+    print("    POST /api/database/check-duplicates - Check if jobs exist")
+    print("    DELETE /api/jobs/<job_id> - Delete job")
+    print("    GET  /api/health - Health check")
     print("\n💾 Saving ONLY 18 required columns to PostgreSQL")
+    print("🔒 SSLMODE='require' ENABLED for secure database connection.")
     print("🔍 DEDUPLICATION ENABLED:")
-    print("   - Loads existing job hashes on startup")
-    print("   - Checks each job before scraping")
-    print("   - Skips jobs already in database")
-    print("   - Uses hash of: title + company + location + URL")
+    print("    - Loads existing job hashes on startup")
+    print("    - Checks each job before scraping")
+    print("    - Skips jobs already in database")
+    print("    - Uses hash of: title + company + location + URL")
     print("\n🧹 Automatic cleanup: Keeps last 50 jobs in memory")
     print("🌐 Access the frontend at: http://localhost:5000")
     
